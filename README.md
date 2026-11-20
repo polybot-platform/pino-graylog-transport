@@ -18,20 +18,6 @@ A Pino transport module that sends log messages to Graylog using the GELF (Grayl
 npm install @alex-michaud/pino-graylog-transport pino
 ```
 
-## Publishing & Installation
-
-This package is published under the scope `@alex-michaud`. To install, use the following command:
-
-```bash
-npm install @alex-michaud/pino-graylog-transport
-```
-
-If you encounter permissions issues, you may need to add `--access public` to the install command:
-
-```bash
-npm install @alex-michaud/pino-graylog-transport --access public
-```
-
 ## Quick Start
 
 ```javascript
