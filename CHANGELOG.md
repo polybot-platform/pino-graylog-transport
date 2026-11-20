@@ -1,3 +1,9 @@
+## [1.2.2](https://github.com/polybot-platform/pino-graylog-transport/compare/v1.2.1...v1.2.2) (2026-11-20)
+
+### Bug Fixes
+
+* update repository URLs to polybot-platform ([835523a](https://github.com/polybot-platform/pino-graylog-transport/commit/835523afe5e686a9a412495acecc7bc905ac119a))
+
 ## [1.2.1](https://github.com/alex-michaud/pino-graylog-transport/compare/v1.2.0...v1.2.1) (2026-01-13)
 
 ### Bug Fixes
