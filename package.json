@@ -4,7 +4,7 @@
   "author": "Alexandre Michaud <alex-michaud@users.noreply.github.com>",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/alex-michaud/pino-graylog-transport.git"
+    "url": "git+https://github.com/polybot-platform/pino-graylog-transport.git"
   },
   "main": "dist/index.js",
   "devDependencies": {
@@ -32,7 +32,7 @@
     "winston-transport": "^4.9.0"
   },
   "bugs": {
-    "url": "https://github.com/alex-michaud/pino-graylog-transport/issues"
+    "url": "https://github.com/polybot-platform/pino-graylog-transport/issues"
   },
   "description": "Pino transport that sends log to graylog",
   "engines": {
@@ -43,7 +43,7 @@
     "README.md",
     "LICENSE"
   ],
-  "homepage": "https://github.com/alex-michaud/pino-graylog-transport#readme",
+  "homepage": "https://github.com/polybot-platform/pino-graylog-transport#readme",
   "keywords": [
     "pino",
     "transport",

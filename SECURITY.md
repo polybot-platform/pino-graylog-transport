@@ -14,7 +14,7 @@ We currently support the latest major version of this package.
 We take the security of `pino-graylog-transport` seriously. If you discover a security vulnerability, please **do not open a public issue**.
 
 ### Preferred Method
-Please report vulnerabilities privately using [GitHub Security Advisories](https://github.com/alex-michaud/pino-graylog-transport/security/advisories/new). This allows us to discuss and fix the issue before it is disclosed to the public.
+Please report vulnerabilities privately using [GitHub Security Advisories](https://github.com/polybot-platform/pino-graylog-transport/security/advisories/new). This allows us to discuss and fix the issue before it is disclosed to the public.
 
 If the "Report a vulnerability" button is not available, please contact the maintainer directly or open a generic issue asking for a private communication channel without disclosing details.
 

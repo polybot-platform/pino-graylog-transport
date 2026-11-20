@@ -2,6 +2,8 @@
 
 A Pino transport module that sends log messages to Graylog using the GELF (Graylog Extended Log Format) protocol over TCP, TLS, or UDP.
 
+Built and maintained by the team behind [Polybot](https://polybotplatform.com), a platform for building virtual assistants that perform tasks, answer questions, and connect to your tools.
+
 ## Features
 
 - 🚀 Full support for Pino transports API
