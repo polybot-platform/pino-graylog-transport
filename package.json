@@ -1,6 +1,6 @@
 {
   "name": "@alex-michaud/pino-graylog-transport",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "author": "Alexandre Michaud <alex-michaud@users.noreply.github.com>",
   "repository": {
     "type": "git",

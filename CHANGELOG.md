@@ -1,3 +1,9 @@
+## [1.3.1](https://github.com/polybot-platform/pino-graylog-transport/compare/v1.3.0...v1.3.1) (2026-11-21)
+
+### Performance Improvements
+
+* send UDP through a connected socket under Bun ([ce86a2a](https://github.com/polybot-platform/pino-graylog-transport/commit/ce86a2ad5581158ca797d80411535ee86b9f79ce))
+
 ## [1.3.0](https://github.com/polybot-platform/pino-graylog-transport/compare/v1.2.3...v1.3.0) (2026-11-21)
 
 ### Features
