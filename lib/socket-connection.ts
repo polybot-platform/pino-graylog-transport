@@ -1,5 +1,6 @@
 import net from 'node:net'
 import tls from 'node:tls'
+import type { GraylogTlsOptions } from './types'
 
 // Probe idle connections after 30 seconds instead of the OS default (2 hours
 // on Linux), so a connection silently dropped by a NAT or load balancer is
@@ -10,6 +11,8 @@ export interface SocketConnectionOpts {
   host: string
   port: number
   protocol: 'tcp' | 'tls' | 'udp'
+  /** Extra tls.connect() options for protocol 'tls' */
+  tls?: GraylogTlsOptions
   onConnect: () => void
   onError: (error: Error, context: Record<string, unknown>) => void
   onClose: () => void
@@ -79,7 +82,13 @@ export class SocketConnectionManager {
     connectionTimeout: NodeJS.Timeout,
   ): net.Socket {
     const socket = tls.connect(
-      { host: opts.host, port: opts.port, rejectUnauthorized: true },
+      {
+        // Verify the server certificate unless explicitly turned off
+        rejectUnauthorized: true,
+        ...opts.tls,
+        host: opts.host,
+        port: opts.port,
+      },
       () => {
         clearTimeout(connectionTimeout)
         opts.onConnect()

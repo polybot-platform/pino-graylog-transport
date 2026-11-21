@@ -2,6 +2,17 @@
  * Shared types for the pino-graylog-transport package.
  */
 
+import type { ConnectionOptions } from 'node:tls'
+
+/**
+ * TLS settings for `protocol: 'tls'`, passed to `tls.connect()`. The host and
+ * port come from the transport options.
+ */
+export type GraylogTlsOptions = Omit<
+  ConnectionOptions,
+  'host' | 'port' | 'socket' | 'path'
+>
+
 /**
  * Configuration options for the Graylog transport.
  */
@@ -13,6 +24,14 @@ export type PinoGraylogTransportOptions = {
   port?: number
   /** Protocol to use for connection (default: 'tls') */
   protocol?: 'tcp' | 'tls' | 'udp'
+  /**
+   * TLS settings for protocol 'tls', passed to `tls.connect()`. For example
+   * `ca` for an internal certificate authority, `cert` and `key` for client
+   * certificates (mTLS), `servername`, or `minVersion`. The server
+   * certificate is always verified unless this sets
+   * `rejectUnauthorized: false`, which should only be done for testing.
+   */
+  tls?: GraylogTlsOptions
 
   // Static metadata sent with every log message (e.g., tokens, environment, tags)
   /** Static metadata to include with every log message */

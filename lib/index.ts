@@ -1,7 +1,12 @@
 import graylogTransport, {
+  type GraylogTlsOptions,
   PinoGraylogTransport,
   PinoGraylogTransportOptions,
 } from './graylog-transport'
 
-export { PinoGraylogTransport, PinoGraylogTransportOptions }
+export {
+  type GraylogTlsOptions,
+  PinoGraylogTransport,
+  PinoGraylogTransportOptions,
+}
 export default graylogTransport

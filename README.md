@@ -52,6 +52,7 @@ logger.info('Hello Graylog!');
 | `host` | string | `'localhost'` | Graylog server hostname |
 | `port` | number | `12201` | Graylog GELF input port (standard GELF TCP port) |
 | `protocol` | string | `'tls'` | Protocol to use (`'tcp'`, `'tls'`, or `'udp'`). **Default is `'tls'` for security** - uses encrypted connection to prevent exposure of sensitive data. Use `'tcp'` only for local development. Use `'udp'` for high-throughput scenarios where delivery guarantees are not required. |
+| `tls` | object | `undefined` | TLS settings for `protocol: 'tls'`, passed to Node's [`tls.connect()`](https://nodejs.org/api/tls.html#tlsconnectoptions-callback): for example `ca`, `cert` and `key`, `servername`, or `minVersion`. The server certificate is always verified unless you set `rejectUnauthorized: false`. See [Using a Private Certificate Authority](#using-a-private-certificate-authority). |
 | `facility` | string | `hostname` | **Application/service identifier** sent with every message. Used to categorize logs by application in Graylog (e.g., `'api-gateway'`, `'auth-service'`). Sent as `_facility` additional field per [GELF spec](https://go2docs.graylog.org/current/getting_in_log_data/gelf.html). |
 | `hostname` | string | `os.hostname()` | Host field in GELF messages (the machine/server name) |
 | `staticMeta` | object | `{}` | Static fields included in **every** log message (e.g., auth tokens, environment, datacenter). These are sent as GELF custom fields with underscore prefix. |
@@ -68,6 +69,27 @@ The default protocol is **`tls`** to ensure logs are transmitted securely over e
 - Logging sensitive data (PII, API keys, internal URLs)
 
 Only use `protocol: 'tcp'` for local development when Graylog is running on `localhost`.
+
+### Using a Private Certificate Authority
+
+If your Graylog server uses a certificate from an internal certificate authority, pass that CA in `tls.ca`. Don't set `NODE_TLS_REJECT_UNAUTHORIZED=0`: it turns off certificate checks for every connection in the process.
+
+```javascript
+const fs = require('node:fs');
+const transport = require('@alex-michaud/pino-graylog-transport');
+
+const transportInstance = transport({
+  host: 'graylog.internal.example.com',
+  port: 12201,
+  protocol: 'tls',
+  tls: {
+    ca: fs.readFileSync('/etc/ssl/internal-ca.pem'),
+    // For client certificate authentication (mTLS):
+    // cert: fs.readFileSync('/etc/ssl/client.pem'),
+    // key: fs.readFileSync('/etc/ssl/client-key.pem'),
+  },
+});
+```
 
 ## Using with Authentication Tokens
 

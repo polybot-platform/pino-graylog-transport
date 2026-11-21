@@ -5,11 +5,15 @@ import { FlushManager } from './flush-manager'
 import { createGelfFormatter, type GelfFormatter } from './gelf-formatter'
 import { MessageQueue } from './message-queue'
 import { SocketConnectionManager } from './socket-connection'
-import type { ErrorHandler, PinoGraylogTransportOptions } from './types'
+import type {
+  ErrorHandler,
+  GraylogTlsOptions,
+  PinoGraylogTransportOptions,
+} from './types'
 import { UdpClient } from './udp-client'
 
 // Re-export types for convenience
-export type { PinoGraylogTransportOptions } from './types'
+export type { GraylogTlsOptions, PinoGraylogTransportOptions } from './types'
 
 // Delay before reconnecting after a failed connection attempt: doubles after
 // each failure, from MIN to MAX, with jitter.
@@ -48,6 +52,7 @@ export class PinoGraylogTransport extends Writable {
   private readonly host: string
   private readonly port: number
   private readonly protocol: 'tcp' | 'tls' | 'udp'
+  private readonly tlsOptions?: GraylogTlsOptions
   private readonly formatGelf: GelfFormatter
   private readonly waitForDrain: boolean
   private readonly handleError: ErrorHandler
@@ -59,6 +64,7 @@ export class PinoGraylogTransport extends Writable {
     this.host = opts.host ?? 'localhost'
     this.port = opts.port ?? 12201
     this.protocol = opts.protocol ?? 'tls'
+    this.tlsOptions = opts.tls
     const hostname = opts.hostname ?? os.hostname()
     this.formatGelf = createGelfFormatter(
       hostname,
@@ -446,6 +452,7 @@ export class PinoGraylogTransport extends Writable {
         host: this.host,
         port: this.port,
         protocol: this.protocol,
+        tls: this.tlsOptions,
         onConnect: () => {
           connected = true
           endAttempt()
