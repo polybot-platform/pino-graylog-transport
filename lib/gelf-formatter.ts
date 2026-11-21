@@ -47,9 +47,13 @@ function isJsonWhitespace(code: number): boolean {
 }
 
 function parseChunk(chunk: unknown): Record<string, unknown> {
-  // Objects are passed through as-is
+  // Objects are passed through as-is. An array is sent as one message: as a
+  // record, each index would become a field (_0, _1, ...), and a long array
+  // could exceed the Graylog index's field limit.
   if (typeof chunk === 'object' && chunk !== null && !Buffer.isBuffer(chunk)) {
-    return chunk as Record<string, unknown>
+    return Array.isArray(chunk)
+      ? { msg: JSON.stringify(chunk) }
+      : (chunk as Record<string, unknown>)
   }
 
   let str = ''
@@ -59,13 +63,13 @@ function parseChunk(chunk: unknown): Record<string, unknown> {
     str = chunk.toString()
   }
 
-  // Only try parsing if it looks like JSON: this avoids throwing on plain
-  // text logs. Scan for the first non-whitespace character instead of
-  // trim(), which would copy the whole line.
+  // Only try parsing if it looks like a JSON object: this avoids throwing on
+  // plain text logs. Scan for the first non-whitespace character instead of
+  // trim(), which would copy the whole line. Anything else, including JSON
+  // arrays (see above), is sent as a plain message.
   let i = 0
   while (i < str.length && isJsonWhitespace(str.charCodeAt(i))) i++
-  const first = str.charCodeAt(i)
-  if (first === 123 /* { */ || first === 91 /* [ */) {
+  if (str.charCodeAt(i) === 123 /* { */) {
     try {
       const parsed = JSON.parse(str)
       if (typeof parsed === 'object' && parsed !== null) return parsed
@@ -109,6 +113,21 @@ function encodeField(name: string, value: unknown): string {
     : `,${JSON.stringify(name)}:${encodedValue}`
 }
 
+// A custom field's value as JSON (objects as JSON strings), or undefined to
+// skip the field: when JSON would omit it (functions, symbols) or it cannot be
+// serialized (circular, BigInt, a throwing toJSON). Skipping one field keeps
+// the rest of the record; Pino's JSON lines never hit this, only objects
+// written to the stream directly.
+function encodeCustomValue(value: unknown): string | undefined {
+  try {
+    return JSON.stringify(
+      typeof value === 'object' ? JSON.stringify(value) : value,
+    )
+  } catch {
+    return undefined
+  }
+}
+
 /** How one record key is sent; null means the key is never sent as a custom field. */
 type KeyPlan = {
   /** `,"_name":`, ready to be followed by the encoded value */
@@ -141,7 +160,9 @@ export function createGelfFormatter(
 ): GelfFormatter {
   // Static fields, resolved in the same order they are applied:
   // _facility first, then staticMeta (which may override _facility).
-  const staticFields: Record<string, unknown> = {}
+  // No prototype, so that `in` below only matches fields set here (and not,
+  // for example, a record key named __proto__)
+  const staticFields: Record<string, unknown> = Object.create(null)
   if (facility) staticFields._facility = facility
   for (const key in staticMeta) {
     const value = staticMeta[key]
@@ -198,9 +219,7 @@ export function createGelfFormatter(
     // values cannot contain an unescaped `,"`, so this only matches keys.
     if (plan.twin in obj && custom.includes(plan.prefix)) return ''
 
-    const encodedValue = JSON.stringify(
-      typeof value === 'object' ? JSON.stringify(value) : value,
-    )
+    const encodedValue = encodeCustomValue(value)
     return encodedValue === undefined ? '' : plan.prefix + encodedValue
   }
 

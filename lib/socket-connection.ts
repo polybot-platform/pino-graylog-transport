@@ -1,6 +1,11 @@
 import net from 'node:net'
 import tls from 'node:tls'
 
+// Probe idle connections after 30 seconds instead of the OS default (2 hours
+// on Linux), so a connection silently dropped by a NAT or load balancer is
+// noticed instead of swallowing logs.
+const KEEPALIVE_DELAY_MS = 30_000
+
 export interface SocketConnectionOpts {
   host: string
   port: number
@@ -40,6 +45,8 @@ export class SocketConnectionManager {
       } catch (_e) {}
       opts.onError(timeoutError, { reason: 'Connection timeout' })
     }, 10000)
+    // The connecting socket keeps the process alive; the timer need not
+    connectionTimeout.unref()
 
     if (opts.protocol === 'tcp') {
       socket = this.createNodeTcpConnection(opts, connectionTimeout)
@@ -62,7 +69,7 @@ export class SocketConnectionManager {
       },
     )
     socket.setNoDelay(true)
-    socket.setKeepAlive(true)
+    socket.setKeepAlive(true, KEEPALIVE_DELAY_MS)
     this.attachSocketHandlers(socket, opts, connectionTimeout, 'TCP')
     return socket
   }
@@ -79,7 +86,7 @@ export class SocketConnectionManager {
       },
     )
     socket.setNoDelay(true)
-    socket.setKeepAlive(true)
+    socket.setKeepAlive(true, KEEPALIVE_DELAY_MS)
     this.attachSocketHandlers(socket, opts, connectionTimeout, 'TLS')
     return socket
   }

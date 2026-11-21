@@ -251,7 +251,12 @@ export class UdpClient {
 
     // Reject oversized messages to prevent truncation/rejection by Graylog
     // TODO: Implement GELF chunking for messages > 8192 bytes
-    const size = Buffer.byteLength(message)
+    // UTF-8 needs at most 3 bytes per UTF-16 code unit, so shorter messages
+    // fit without counting their bytes.
+    const size =
+      message.length * 3 <= MAX_UDP_MESSAGE_BYTES
+        ? 0
+        : Buffer.byteLength(message)
     if (size > MAX_UDP_MESSAGE_BYTES) {
       const error = new Error(
         `GELF UDP message exceeds ${MAX_UDP_MESSAGE_BYTES} bytes (${size}). Message rejected. Consider using TCP/TLS for large messages or implement chunking.`,

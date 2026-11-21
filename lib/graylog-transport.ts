@@ -11,6 +11,17 @@ import { UdpClient } from './udp-client'
 // Re-export types for convenience
 export type { PinoGraylogTransportOptions } from './types'
 
+// Delay before reconnecting after a failed connection attempt: doubles after
+// each failure, from MIN to MAX, with jitter.
+const MIN_RECONNECT_DELAY_MS = 1000
+const MAX_RECONNECT_DELAY_MS = 30_000
+
+const noop = () => {}
+
+function toError(err: unknown): Error {
+  return err instanceof Error ? err : new Error(String(err))
+}
+
 /**
  * A Writable stream that sends logs to Graylog and exposes status methods.
  */
@@ -20,6 +31,13 @@ export class PinoGraylogTransport extends Writable {
   private corkedSocket: net.Socket | null = null
   private udpClient: UdpClient | null = null
   private connectionPromise: Promise<net.Socket> | null = null
+  // Socket and cleanup of the connection attempt in progress, so that
+  // _destroy() can stop it
+  private connectingSocket: net.Socket | null = null
+  private connectingCleanup: (() => void) | null = null
+  private reconnectDelay = 0
+  private nextConnectAt = 0
+  private reconnectTimer: NodeJS.Timeout | null = null
   private messageQueue: MessageQueue
   private flushManager: FlushManager
   private initializationAttempted = false
@@ -188,11 +206,24 @@ export class PinoGraylogTransport extends Writable {
     _encoding: BufferEncoding,
     callback: (error?: Error | null) => void,
   ): void {
-    const gelfStr = this.formatGelf(chunk)
+    // Errors are reported through onError and never passed to the stream
+    // callback: that would destroy the stream, and crash the process if
+    // nothing listens for 'error'. One bad record must not stop logging.
+    let gelfStr: string
+    try {
+      gelfStr = this.formatGelf(chunk)
+    } catch (err) {
+      this.handleError(toError(err), {
+        reason: 'Failed to format log record as GELF',
+      })
+      callback()
+      return
+    }
 
     // UDP: Send directly without null terminator (not required for UDP GELF)
     if (this.protocol === 'udp' && this.udpClient) {
-      this.udpClient.send(gelfStr, callback)
+      // UdpClient reports send errors (such as oversized messages) itself
+      this.udpClient.send(gelfStr, () => callback())
       return
     }
 
@@ -223,8 +254,13 @@ export class PinoGraylogTransport extends Writable {
     const flushUntilDone = async (retries = 0): Promise<void> => {
       await this.flush()
 
-      // Check if more writes came in during the flush
-      if (this.getPendingWriteCount() > 0 && retries < maxRetries) {
+      // Check if more writes came in during the flush. Don't retry while
+      // Graylog is unreachable: each retry would wait for a connection again.
+      if (
+        this.getPendingWriteCount() > 0 &&
+        this.isConnected() &&
+        retries < maxRetries
+      ) {
         return flushUntilDone(retries + 1)
       }
     }
@@ -238,6 +274,13 @@ export class PinoGraylogTransport extends Writable {
   ): void {
     if (this.socket && !this.socket.destroyed) {
       this.socket.destroy()
+    }
+    // Stop a connection attempt in progress and its timeout
+    this.connectingCleanup?.()
+    this.connectingSocket?.destroy()
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer)
+      this.reconnectTimer = null
     }
     if (this.udpClient) {
       this.udpClient.close()
@@ -299,10 +342,30 @@ export class PinoGraylogTransport extends Writable {
     // Call callback immediately (fire-and-forget) unless waitForDrain is enabled
     // When socket.write() returns false, the internal buffer is full and we should wait for drain
     if (this.waitForDrain && !canContinue) {
-      socket.once('drain', () => callback())
+      this.waitUntilWritable(socket, callback)
       return
     }
     callback()
+  }
+
+  /**
+   * Calls callback once the socket drains, or closes or fails first. Without
+   * the close and error cases, a socket lost while full would never call
+   * back, and the stream would buffer every later log line without limit.
+   */
+  private waitUntilWritable(
+    socket: net.Socket,
+    callback: (error?: Error | null) => void,
+  ): void {
+    const done = () => {
+      socket.removeListener('drain', done)
+      socket.removeListener('close', done)
+      socket.removeListener('error', done)
+      callback()
+    }
+    socket.once('drain', done)
+    socket.once('close', done)
+    socket.once('error', done)
   }
 
   private queueMessage(
@@ -310,12 +373,41 @@ export class PinoGraylogTransport extends Writable {
     callback: (error?: Error | null) => void,
   ): void {
     this.messageQueue.enqueue(message)
-    this.connect().catch((err) => {
-      this.handleError(err, {
-        reason: 'Failed to connect while sending message',
-      })
-    })
+    this.scheduleConnect()
     callback()
+  }
+
+  /**
+   * Connects now, or after the reconnect delay if the last attempt failed.
+   * Connection errors are reported once, by connect(), not once per message.
+   */
+  private scheduleConnect(): void {
+    if (this.connectionPromise || this.reconnectTimer || this.destroyed) {
+      return
+    }
+    const wait = this.nextConnectAt - Date.now()
+    if (wait <= 0) {
+      this.connect().catch(noop)
+      return
+    }
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null
+      if (this.messageQueue.size() > 0 && !this.destroyed) {
+        this.connect().catch(noop)
+      }
+    }, wait)
+    // Don't keep the process alive just to retry
+    this.reconnectTimer.unref()
+  }
+
+  private connectionFailed(): void {
+    this.reconnectDelay = Math.min(
+      Math.max(MIN_RECONNECT_DELAY_MS, this.reconnectDelay * 2),
+      MAX_RECONNECT_DELAY_MS,
+    )
+    // Jitter: wait between 50% and 100% of the delay
+    this.nextConnectAt =
+      Date.now() + this.reconnectDelay * (0.5 + Math.random() * 0.5)
   }
 
   private connect(): Promise<net.Socket> {
@@ -327,17 +419,40 @@ export class PinoGraylogTransport extends Writable {
       return this.connectionPromise
     }
 
-    this.connectionPromise = new Promise<net.Socket>((resolve, reject) => {
+    const attempt = new Promise<net.Socket>((resolve, reject) => {
       let cleanupFn: (() => void) | null = null
+      let connected = false
+      let failed = false
+      // 'close' usually follows 'error': count each failed attempt once
+      const fail = (error: Error) => {
+        if (connected || failed) return
+        failed = true
+        this.connectionFailed()
+        reject(error)
+      }
+
+      // Only the latest attempt may clear the shared connection state: a late
+      // event from an older socket must not drop a newer connection.
+      const endAttempt = () => {
+        if (cleanupFn) cleanupFn()
+        if (this.connectingSocket === socket) {
+          this.connectingSocket = null
+          this.connectingCleanup = null
+        }
+        if (this.connectionPromise === attempt) this.connectionPromise = null
+      }
 
       const { socket, cleanup } = this.socketManager.createConnection({
         host: this.host,
         port: this.port,
         protocol: this.protocol,
         onConnect: () => {
-          if (cleanupFn) cleanupFn()
+          connected = true
+          endAttempt()
           this.socket = socket
           this.ready = true
+          this.reconnectDelay = 0
+          this.nextConnectAt = 0
 
           if (!this.initializationAttempted && this.onReady) {
             this.initializationAttempted = true
@@ -347,29 +462,30 @@ export class PinoGraylogTransport extends Writable {
           // Flush queued messages
           this.flushQueuedMessages()
 
-          this.connectionPromise = null
           resolve(socket)
         },
         onError: (error, context) => {
-          if (cleanupFn) cleanupFn()
+          endAttempt()
           this.handleError(error, context)
-          this.socket = null
-          this.connectionPromise = null
-          reject(error)
+          if (this.socket === socket) this.socket = null
+          fail(error)
         },
         onClose: () => {
-          if (cleanupFn) cleanupFn()
-          this.socket = null
-          if (this.connectionPromise) {
-            this.connectionPromise = null
-          }
+          endAttempt()
+          if (this.socket === socket) this.socket = null
+          // Closed without an error before connecting: settle the attempt so
+          // that flush() and other callers waiting for it don't hang
+          fail(new Error('Graylog connection closed before it was ready'))
         },
       })
 
       cleanupFn = cleanup
+      this.connectingSocket = socket
+      this.connectingCleanup = cleanup
     })
 
-    return this.connectionPromise
+    this.connectionPromise = attempt
+    return attempt
   }
 
   /**

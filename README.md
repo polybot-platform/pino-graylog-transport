@@ -55,8 +55,8 @@ logger.info('Hello Graylog!');
 | `facility` | string | `hostname` | **Application/service identifier** sent with every message. Used to categorize logs by application in Graylog (e.g., `'api-gateway'`, `'auth-service'`). Sent as `_facility` additional field per [GELF spec](https://go2docs.graylog.org/current/getting_in_log_data/gelf.html). |
 | `hostname` | string | `os.hostname()` | Host field in GELF messages (the machine/server name) |
 | `staticMeta` | object | `{}` | Static fields included in **every** log message (e.g., auth tokens, environment, datacenter). These are sent as GELF custom fields with underscore prefix. |
-| `maxQueueSize` | number | `1000` | Max messages to queue when disconnected |
-| `onError` | function | `console.error` | Custom error handler |
+| `maxQueueSize` | number | `1000` | Max messages to queue when disconnected. While Graylog cannot be reached, the transport retries the connection after about 1 second, doubling the delay up to 30 seconds. |
+| `onError` | function | `console.error` | Custom error handler. Every error is reported here: connection failures, UDP messages over 8192 bytes, and records that cannot be formatted. The stream never emits them as `'error'` events, so one failure does not stop logging. |
 | `onReady` | function | `undefined` | Callback when connection is established |
 | `autoConnect` | boolean | `true` | If `false`, don't establish connection on initialization. Only applies to TCP/TLS; UDP always initializes immediately since it's connectionless. |
 

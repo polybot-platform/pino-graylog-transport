@@ -6,6 +6,29 @@ import type net from 'node:net'
 type FlushResolver = () => void
 
 /**
+ * Resolves to true when the promise settles successfully within `ms`, and to
+ * false when it rejects or the time runs out.
+ */
+function settlesWithin(
+  promise: Promise<unknown>,
+  ms: number,
+): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    const timer = setTimeout(() => resolve(false), Math.max(0, ms))
+    promise.then(
+      () => {
+        clearTimeout(timer)
+        resolve(true)
+      },
+      () => {
+        clearTimeout(timer)
+        resolve(false)
+      },
+    )
+  })
+}
+
+/**
  * Options for creating a FlushManager instance.
  */
 export type FlushManagerOptions = {
@@ -96,6 +119,8 @@ export class FlushManager {
    */
   async flush(timeout = 5000): Promise<void> {
     this.flushCount++
+    // The timeout covers the whole flush, including waiting for a connection
+    const deadline = Date.now() + timeout
 
     const decrementFlushCount = () => {
       this.flushCount = Math.max(0, this.flushCount - 1)
@@ -103,23 +128,22 @@ export class FlushManager {
 
     // Wait for any pending connection
     const connectionPromise = this.opts.getConnectionPromise()
-    if (connectionPromise) {
-      try {
-        await connectionPromise
-      } catch {
-        decrementFlushCount()
-        return
-      }
+    if (
+      connectionPromise &&
+      !(await settlesWithin(connectionPromise, deadline - Date.now()))
+    ) {
+      decrementFlushCount()
+      return
     }
 
     // If queue has items but no socket, try to connect
-    if (this.opts.getQueueSize() > 0 && !this.opts.isConnected()) {
-      try {
-        await this.opts.connect()
-      } catch {
-        decrementFlushCount()
-        return
-      }
+    if (
+      this.opts.getQueueSize() > 0 &&
+      !this.opts.isConnected() &&
+      !(await settlesWithin(this.opts.connect(), deadline - Date.now()))
+    ) {
+      decrementFlushCount()
+      return
     }
 
     // If nothing pending, we're done
@@ -127,7 +151,11 @@ export class FlushManager {
       // Wait for socket buffer to drain
       const socket = this.opts.getSocket()
       if (socket && socket.writableLength > 0) {
-        await this.waitForSocketDrain(socket, timeout, decrementFlushCount)
+        await this.waitForSocketDrain(
+          socket,
+          deadline - Date.now(),
+          decrementFlushCount,
+        )
         return
       }
       decrementFlushCount()
@@ -149,7 +177,10 @@ export class FlushManager {
         resolve()
       }
 
-      const timeoutId = setTimeout(doResolve, timeout)
+      const timeoutId = setTimeout(
+        doResolve,
+        Math.max(0, deadline - Date.now()),
+      )
 
       this.drainResolvers.push(doResolve)
       this.checkDrain()
@@ -176,7 +207,7 @@ export class FlushManager {
         onComplete()
         resolve()
       }
-      const drainTimeout = setTimeout(doResolve, timeout)
+      const drainTimeout = setTimeout(doResolve, Math.max(0, timeout))
       socket.once('drain', doResolve)
       socket.once('error', doResolve)
       socket.once('close', doResolve)

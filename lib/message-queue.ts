@@ -26,10 +26,16 @@ export class MessageQueue {
     if (this.queue.length >= this.maxSize) {
       this.droppedCount++
 
-      if (this.dropWhenFull) {
+      // With a queue size of 0 or less there is no oldest message to drop
+      if (this.dropWhenFull || this.queue.length === 0) {
         // Drop the new message
         if (this.droppedCount % 100 === 1) {
-          this.onDropped('Queue full, dropWhenFull=true', this.droppedCount)
+          this.onDropped(
+            this.dropWhenFull
+              ? 'Queue full, dropWhenFull=true'
+              : 'Queue size is 0, dropping message',
+            this.droppedCount,
+          )
         }
         return false
       }
@@ -52,7 +58,7 @@ export class MessageQueue {
    * Get all messages and clear the queue
    */
   flush(): string[] {
-    const messages = [...this.queue]
+    const messages = this.queue
     this.queue = []
     return messages
   }

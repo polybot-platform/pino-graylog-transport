@@ -1,5 +1,5 @@
 import { bench, group, run } from 'mitata'
-import { formatGelfMessage } from '../../lib/gelf-formatter'
+import { createGelfFormatter } from '../../lib/gelf-formatter'
 
 // Mock data
 const pinoLog = {
@@ -26,6 +26,8 @@ const pinoLog = {
 const hostname = 'benchmark-host'
 const facility = 'benchmark-app'
 const staticMeta = { _env: 'production' }
+// The transport creates its formatter once, so the benchmark does too
+const formatGelf = createGelfFormatter(hostname, facility, staticMeta)
 
 // We benchmark formatting logic only (no network I/O)
 group('GELF Formatting', () => {
@@ -34,8 +36,8 @@ group('GELF Formatting', () => {
     JSON.stringify(pinoLog)
   })
 
-  bench('pino-graylog-transport: formatGelfMessage', () => {
-    formatGelfMessage(pinoLog, hostname, facility, staticMeta)
+  bench('pino-graylog-transport: createGelfFormatter', () => {
+    formatGelf(pinoLog)
   })
 
   bench('Manual GELF Construction (Simulated Alternative)', () => {
