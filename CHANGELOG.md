@@ -1,3 +1,13 @@
+## [1.3.2](https://github.com/polybot-platform/pino-graylog-transport/compare/v1.3.1...v1.3.2) (2026-11-21)
+
+### Bug Fixes
+
+* send each log line as its own message with pino.transport() ([45f20a6](https://github.com/polybot-platform/pino-graylog-transport/commit/45f20a65de206d89376584fcd2e2851d29c2ebf7))
+
+### Documentation
+
+* new package name, worker threads, and November benchmark results ([134e768](https://github.com/polybot-platform/pino-graylog-transport/commit/134e768986b70dab38d8b7bc89e5b3eaa1946cd1))
+
 ## [1.3.1](https://github.com/polybot-platform/pino-graylog-transport/compare/v1.3.0...v1.3.1) (2026-11-21)
 
 ### Performance Improvements
