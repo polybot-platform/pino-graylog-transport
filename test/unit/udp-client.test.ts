@@ -537,6 +537,43 @@ describe('UDP Client', function () {
       expect(client.isReady()).to.be.true
     })
 
+    it('should keep sending after the Bun socket is replaced for a new address', async function () {
+      if (typeof process.versions.bun === 'undefined') this.skip()
+
+      const receiver = dgram.createSocket('udp4')
+      const received: string[] = []
+      receiver.on('message', (msg) => received.push(msg.toString()))
+      await new Promise<void>((resolve) =>
+        receiver.bind(0, '127.0.0.1', resolve),
+      )
+      const wait = () => new Promise((resolve) => setTimeout(resolve, 100))
+
+      try {
+        client = new UdpClient({
+          host: '127.0.0.1',
+          port: receiver.address().port,
+        })
+        client.connect()
+        client.send('before')
+        await wait()
+
+        // What the address refresh does when the host's address changes
+        // biome-ignore lint/suspicious/noExplicitAny: testing private state
+        const internal = client as any
+        const previous = internal.bunSocket
+        internal.replaceBunSocket('127.0.0.1')
+        await wait()
+        expect(internal.bunSocket).to.not.equal(previous)
+        expect(previous.closed).to.equal(true)
+
+        client.send('after')
+        await wait()
+        expect(received).to.deep.equal(['before', 'after'])
+      } finally {
+        receiver.close()
+      }
+    })
+
     it('should detect Bun runtime if available', () => {
       // Check if we're running in Bun
       const isBun = typeof process.versions.bun !== 'undefined'

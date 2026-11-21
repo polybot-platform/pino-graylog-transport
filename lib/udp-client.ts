@@ -17,16 +17,19 @@ const MAX_PENDING_MESSAGES = 1000
 // socket only sends to IP addresses.
 const ADDRESS_REFRESH_MS = 60_000
 
-// Type definitions for Bun's UDP API
+// Type definitions for Bun's UDP API (connected socket)
 interface BunUdpSocket {
   /** Returns false when the packet was not sent (send buffer full) */
-  send(data: string | Uint8Array, port: number, address: string): boolean
+  send(data: string | Uint8Array): boolean
   close(): void
 }
 
 interface BunGlobal {
   Bun?: {
     udpSocket: (opts: {
+      // Sending through a connected socket skips the per-packet address
+      // handling of send(data, port, address)
+      connect: { hostname: string; port: number }
       socket: {
         // Typed by Bun as (socket, error), but Bun 1.4 passes only the error
         error?: (...args: unknown[]) => void
@@ -51,16 +54,19 @@ export interface UdpClientOpts {
  * asynchronously, so messages sent before it is ready are held in a small
  * buffer and sent as soon as it is.
  *
- * Bun.udpSocket().send() only accepts IP addresses, so in Bun the host name is
- * resolved here (IPv4, like node:dgram's 'udp4'). If the socket cannot be set
- * up, the client falls back to node:dgram.
+ * In Bun the socket is connected to the Graylog address, which makes each
+ * send cheaper. Bun.udpSocket() only accepts IP addresses, so the host name is
+ * resolved here (IPv4, like node:dgram's 'udp4') and looked up again every
+ * ADDRESS_REFRESH_MS; when the address changes, a new socket replaces the old
+ * one. If the socket cannot be set up, the client falls back to node:dgram.
  */
 export class UdpClient {
   private nodeSocket: dgram.Socket | null = null
   private bunSocket: BunUdpSocket | null = null
   private bunSocketInitializing = false
-  // IPv4 address the Bun socket sends to
+  // IPv4 address the Bun socket is connected to
   private bunAddress = ''
+  private bunSocketReplacing = false
   private addressRefreshTimer: NodeJS.Timeout | null = null
   // Cached lookup of `host` for node:dgram, shared by concurrent sends
   private cachedAddress: Promise<string> | null = null
@@ -127,13 +133,7 @@ export class UdpClient {
     this.resolveHost()
       .then((address) => {
         this.bunAddress = address
-        return Bun.udpSocket({
-          socket: {
-            error: (...args: unknown[]) => this.handleBunSocketError(args),
-            // The kernel send buffer has room again
-            drain: () => this.sendPending(),
-          },
-        })
+        return this.createBunSocket(address)
       })
       .then((socket) => {
         // If client was closed while initializing, clean up immediately
@@ -162,6 +162,49 @@ export class UdpClient {
         const held = this.pending
         this.pending = []
         for (const message of held) this.sendNode(message)
+      })
+  }
+
+  private createBunSocket(address: string): Promise<BunUdpSocket> {
+    const Bun = (globalThis as unknown as BunGlobal).Bun
+    if (!Bun?.udpSocket) {
+      return Promise.reject(new Error('Bun.udpSocket is not available'))
+    }
+    return Bun.udpSocket({
+      connect: { hostname: address, port: this.port },
+      socket: {
+        error: (...args: unknown[]) => this.handleBunSocketError(args),
+        // The kernel send buffer has room again
+        drain: () => this.sendPending(),
+      },
+    })
+  }
+
+  /**
+   * Connects a new Bun socket to `address` and swaps it in. Until it is
+   * ready, messages keep going through the current socket.
+   */
+  private replaceBunSocket(address: string): void {
+    if (this.bunSocketReplacing) return
+    this.bunSocketReplacing = true
+    const generation = this.generation
+    this.createBunSocket(address)
+      .then((socket) => {
+        if (generation !== this.generation) {
+          socket.close()
+          return
+        }
+        const previous = this.bunSocket
+        this.bunSocket = socket
+        this.bunAddress = address
+        previous?.close()
+        this.sendPending()
+      })
+      .catch(() => {
+        // Keep sending to the last known address
+      })
+      .finally(() => {
+        if (generation === this.generation) this.bunSocketReplacing = false
       })
   }
 
@@ -230,7 +273,9 @@ export class UdpClient {
     this.addressRefreshTimer = setInterval(() => {
       this.resolveHost()
         .then((address) => {
-          if (generation === this.generation) this.bunAddress = address
+          if (generation === this.generation && address !== this.bunAddress) {
+            this.replaceBunSocket(address)
+          }
         })
         .catch(() => {
           // Keep sending to the last known address
@@ -284,7 +329,7 @@ export class UdpClient {
     // Keep order: only send directly when nothing is waiting
     if (this.bunSocket && this.pending.length === 0) {
       try {
-        if (this.bunSocket.send(message, this.port, this.bunAddress)) {
+        if (this.bunSocket.send(message)) {
           callback?.(null)
           return
         }
@@ -330,10 +375,7 @@ export class UdpClient {
 
     let sent = 0
     try {
-      while (
-        sent < this.pending.length &&
-        socket.send(this.pending[sent], this.port, this.bunAddress)
-      ) {
+      while (sent < this.pending.length && socket.send(this.pending[sent])) {
         sent++
       }
     } catch (err) {
@@ -387,6 +429,7 @@ export class UdpClient {
   close(): void {
     this.generation++
     this.bunSocketInitializing = false
+    this.bunSocketReplacing = false
     this.pending = []
     if (this.addressRefreshTimer) {
       clearInterval(this.addressRefreshTimer)

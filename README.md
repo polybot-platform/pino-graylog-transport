@@ -272,7 +272,7 @@ const logger = pino(await transport({
 - For large messages, use TCP or TLS protocols instead
 - No delivery guarantees (fire-and-forget)
 
-**Bun Runtime:** When running under [Bun](https://bun.sh/), the UDP transport automatically uses Bun's native `Bun.udpSocket()` API for better performance. The host name is resolved once and refreshed every 60 seconds, because `Bun.udpSocket()` only sends to IP addresses. If the Bun socket cannot be created, the transport falls back to Node's `dgram` module.
+**Bun Runtime:** When running under [Bun](https://bun.sh/), the UDP transport automatically uses Bun's native `Bun.udpSocket()` API, connected to the Graylog address, for better performance. The host name is resolved once and refreshed every 60 seconds, because `Bun.udpSocket()` only sends to IP addresses; if the address changes, a new socket replaces the old one. If the Bun socket cannot be created, the transport falls back to Node's `dgram` module.
 
 ### Run the Example
 
