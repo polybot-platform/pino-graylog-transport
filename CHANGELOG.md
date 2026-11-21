@@ -1,3 +1,13 @@
+## [1.3.0](https://github.com/polybot-platform/pino-graylog-transport/compare/v1.2.3...v1.3.0) (2026-11-21)
+
+### Features
+
+* add a tls option for custom CAs and client certificates ([5e0ec2c](https://github.com/polybot-platform/pino-graylog-transport/commit/5e0ec2c6a7aacc34d3274d932d78a3c3313201a5))
+
+### Bug Fixes
+
+* keep logging when errors occur and stop reconnect storms ([c70a846](https://github.com/polybot-platform/pino-graylog-transport/commit/c70a846effd74f3ca604dd9d77acb3042bd67962))
+
 ## [1.2.3](https://github.com/polybot-platform/pino-graylog-transport/compare/v1.2.2...v1.2.3) (2026-11-21)
 
 ### Bug Fixes
