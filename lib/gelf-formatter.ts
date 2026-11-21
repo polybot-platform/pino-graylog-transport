@@ -8,7 +8,14 @@ export interface GelfMessage {
   [key: string]: unknown
 }
 
-// OPTIMIZATION: Hoist constant outside the hot path and use Set for O(1) lookup
+/**
+ * Formats one log record (a Pino JSON line, a Buffer, or an object) as a
+ * GELF 1.1 JSON string.
+ */
+export type GelfFormatter = (chunk: unknown) => string
+
+// Pino fields that are mapped to standard GELF fields (or dropped) rather than
+// being sent as custom fields.
 const EXCLUDED_FIELDS = new Set([
   'msg',
   'message',
@@ -20,6 +27,8 @@ const EXCLUDED_FIELDS = new Set([
   'v',
   'err',
 ])
+
+const UNDERSCORE = 95 // '_'
 
 export const mapPinoLevelToGelf = (pinoLevel: number | undefined): number => {
   // Pino levels: 10 trace, 20 debug, 30 info, 40 warn, 50 error, 60 fatal
@@ -33,13 +42,16 @@ export const mapPinoLevelToGelf = (pinoLevel: number | undefined): number => {
   return 7 // trace -> debug
 }
 
+function isJsonWhitespace(code: number): boolean {
+  return code === 32 || code === 10 || code === 13 || code === 9
+}
+
 function parseChunk(chunk: unknown): Record<string, unknown> {
-  // OPTIMIZATION: Check object type first (most common case from Pino)
-  if (typeof chunk === 'object' && chunk !== null) {
+  // Objects are passed through as-is
+  if (typeof chunk === 'object' && chunk !== null && !Buffer.isBuffer(chunk)) {
     return chunk as Record<string, unknown>
   }
 
-  // Handle strings and buffers
   let str = ''
   if (typeof chunk === 'string') {
     str = chunk
@@ -47,14 +59,18 @@ function parseChunk(chunk: unknown): Record<string, unknown> {
     str = chunk.toString()
   }
 
-  // OPTIMIZATION: Heuristic check - only try parsing if it looks like JSON
-  // This avoids expensive try-catch throws on plain text logs
-  const firstChar = str.trim()[0]
-  if (firstChar === '{' || firstChar === '[') {
+  // Only try parsing if it looks like JSON: this avoids throwing on plain
+  // text logs. Scan for the first non-whitespace character instead of
+  // trim(), which would copy the whole line.
+  let i = 0
+  while (i < str.length && isJsonWhitespace(str.charCodeAt(i))) i++
+  const first = str.charCodeAt(i)
+  if (first === 123 /* { */ || first === 91 /* [ */) {
     try {
-      return JSON.parse(str)
+      const parsed = JSON.parse(str)
+      if (typeof parsed === 'object' && parsed !== null) return parsed
     } catch {
-      // If parse fails despite looking like JSON, fall back to wrapping it
+      // Looked like JSON but wasn't: send it as a plain message below
     }
   }
 
@@ -62,107 +78,181 @@ function parseChunk(chunk: unknown): Record<string, unknown> {
 }
 
 function extractMessage(obj: Record<string, unknown>): string {
-  // OPTIMIZATION: Use explicit type checks (slightly faster than truthiness)
   if (typeof obj.msg === 'string') return obj.msg
   if (typeof obj.message === 'string') return obj.message
   if (typeof obj.short_message === 'string') return obj.short_message
   return JSON.stringify(obj)
 }
 
-function addStaticMetadata(
-  gelfMessage: GelfMessage,
-  staticMeta: Record<string, unknown>,
-): void {
-  // OPTIMIZATION: Use for...in to avoid allocating Object.entries array
+function extractStack(obj: Record<string, unknown>): string | undefined {
+  if (typeof obj.stack === 'string') return obj.stack
+  const err = obj.err as Record<string, unknown> | undefined | null
+  if (typeof err?.stack === 'string') return err.stack
+  return undefined
+}
+
+// GELF does not support nested objects, so objects are sent as JSON strings
+function toGelfValue(value: unknown): unknown {
+  return typeof value === 'object' ? JSON.stringify(value) : value
+}
+
+function toFieldName(key: string): string {
+  return key.charCodeAt(0) === UNDERSCORE ? key : `_${key}`
+}
+
+// Encode `,"name":value` for one field, or '' when JSON would omit the value
+// (functions, symbols, undefined).
+function encodeField(name: string, value: unknown): string {
+  const encodedValue = JSON.stringify(value)
+  return encodedValue === undefined
+    ? ''
+    : `,${JSON.stringify(name)}:${encodedValue}`
+}
+
+/** How one record key is sent; null means the key is never sent as a custom field. */
+type KeyPlan = {
+  /** `,"_name":`, ready to be followed by the encoded value */
+  prefix: string
+  /** The other key that maps to the same field (`foo` <-> `_foo`) */
+  twin: string
+  /** True when the field is `_pid`, which the record's own pid overrides */
+  isPid: boolean
+} | null
+
+// Record keys repeat across messages, so how each one is sent is worked out
+// once and cached per formatter. Bounded so that high-cardinality keys cannot
+// grow it without limit.
+const MAX_CACHED_KEYS = 1000
+
+/**
+ * Creates a formatter for one transport. The parts of every message that do
+ * not change (host, facility, static metadata) are encoded once here, and each
+ * message is written straight to a JSON string without building an
+ * intermediate GELF object.
+ *
+ * Field precedence: standard GELF fields, then `_facility` and static
+ * metadata, then the record's own fields (first one wins when `foo` and `_foo`
+ * are both present). The record's `pid` is always sent as `_pid`.
+ */
+export function createGelfFormatter(
+  hostname: string,
+  facility: string,
+  staticMeta: Record<string, unknown> = {},
+): GelfFormatter {
+  // Static fields, resolved in the same order they are applied:
+  // _facility first, then staticMeta (which may override _facility).
+  const staticFields: Record<string, unknown> = {}
+  if (facility) staticFields._facility = facility
   for (const key in staticMeta) {
     const value = staticMeta[key]
     if (value !== undefined && value !== null) {
-      // OPTIMIZATION: Use charCodeAt for underscore check (95 is '_')
-      const fieldName = key.charCodeAt(0) === 95 ? key : `_${key}`
-      gelfMessage[fieldName] =
-        typeof value === 'object' ? JSON.stringify(value) : value
+      staticFields[toFieldName(key)] = toGelfValue(value)
     }
   }
-}
 
-function addStackTrace(
-  gelfMessage: GelfMessage,
-  obj: Record<string, unknown>,
-): void {
-  // Check for direct stack
-  if (typeof obj.stack === 'string') {
-    gelfMessage.full_message = obj.stack
-    return
+  let staticPart = ''
+  let staticPartWithoutPid = ''
+  for (const name in staticFields) {
+    const encoded = encodeField(name, staticFields[name])
+    staticPart += encoded
+    if (name !== '_pid') staticPartWithoutPid += encoded
   }
 
-  // Check for nested err.stack using optional chaining
-  const err = obj.err as Record<string, unknown> | undefined
-  if (typeof err?.stack === 'string') {
-    gelfMessage.full_message = err.stack
+  const head = `{"version":"1.1","host":${JSON.stringify(hostname)},"short_message":`
+
+  const keyPlans = new Map<string, KeyPlan>()
+  const planKey = (key: string): KeyPlan => {
+    let plan = keyPlans.get(key)
+    if (plan !== undefined) return plan
+
+    const fieldName = toFieldName(key)
+    // Excluded Pino fields and fields set by _facility/static metadata are
+    // never sent from the record
+    plan =
+      EXCLUDED_FIELDS.has(key) || fieldName in staticFields
+        ? null
+        : {
+            prefix: `,${JSON.stringify(fieldName)}:`,
+            twin: key.charCodeAt(0) === UNDERSCORE ? key.slice(1) : fieldName,
+            isPid: fieldName === '_pid',
+          }
+    if (keyPlans.size < MAX_CACHED_KEYS) keyPlans.set(key, plan)
+    return plan
   }
-}
 
-function addCustomFields(
-  gelfMessage: GelfMessage,
-  obj: Record<string, unknown>,
-): void {
-  // OPTIMIZATION: Use for...in loop instead of Object.entries
-  for (const key in obj) {
-    // OPTIMIZATION: O(1) lookup in Set instead of Array.includes
-    if (EXCLUDED_FIELDS.has(key)) continue
-
+  // One of the record's own fields as `,"_name":value`, or '' to skip it.
+  // `custom` is what has been encoded for this record so far.
+  const encodeCustomField = (
+    obj: Record<string, unknown>,
+    key: string,
+    hasPid: boolean,
+    custom: string,
+  ): string => {
     const value = obj[key]
-    if (value === undefined || value === null) continue
+    if (value === undefined || value === null) return ''
 
-    // OPTIMIZATION: Use charCodeAt for underscore check
-    const fieldName = key.charCodeAt(0) === 95 ? key : `_${key}`
+    const plan = planKey(key)
+    if (plan === null || (hasPid && plan.isPid)) return ''
 
-    // Avoid overwriting standard fields or static meta
-    if (fieldName in gelfMessage) continue
+    // `foo` and `_foo` both map to `_foo`: keep the first one. Encoded
+    // values cannot contain an unescaped `,"`, so this only matches keys.
+    if (plan.twin in obj && custom.includes(plan.prefix)) return ''
 
-    // GELF doesn't support nested objects well, stringify them
-    gelfMessage[fieldName] =
-      typeof value === 'object' ? JSON.stringify(value) : value
+    const encodedValue = JSON.stringify(
+      typeof value === 'object' ? JSON.stringify(value) : value,
+    )
+    return encodedValue === undefined ? '' : plan.prefix + encodedValue
   }
 
-  // Add process info
-  if (obj.pid) {
-    gelfMessage._pid = obj.pid
+  return (chunk: unknown): string => {
+    const obj = parseChunk(chunk)
+
+    // Keep Pino's time (ms since epoch) so queued messages keep their event
+    // time; fall back to now for records without one.
+    const timestamp =
+      typeof obj.time === 'number' ? obj.time * 1e-3 : Date.now() * 1e-3
+
+    // The record's pid always wins over a static or custom `_pid`
+    const pid = obj.pid
+    const hasPid = Boolean(pid)
+
+    let out =
+      head +
+      JSON.stringify(extractMessage(obj)) +
+      ',"timestamp":' +
+      (Number.isFinite(timestamp) ? timestamp : 'null') +
+      ',"level":' +
+      mapPinoLevelToGelf(obj.level as number) +
+      (hasPid ? staticPartWithoutPid : staticPart)
+
+    const stack = extractStack(obj)
+    if (stack !== undefined) {
+      out += `,"full_message":${JSON.stringify(stack)}`
+    }
+
+    let custom = ''
+    for (const key in obj) {
+      custom += encodeCustomField(obj, key, hasPid, custom)
+    }
+    out += custom
+
+    if (hasPid) {
+      out += encodeField('_pid', pid)
+    }
+
+    return `${out}}`
   }
 }
 
+/**
+ * Formats a single message. Prefer createGelfFormatter() when formatting many
+ * messages with the same settings.
+ */
 export function formatGelfMessage(
   chunk: unknown,
   hostname: string,
   facility: string,
   staticMeta: Record<string, unknown> = {},
 ): string {
-  const obj = parseChunk(chunk)
-
-  // Pino adds 'time' field automatically (milliseconds since epoch)
-  // We preserve it to maintain accurate event timing even if messages are queued
-  // Fallback to current time for non-Pino messages
-  // OPTIMIZATION: Use typeof check and multiplication (faster than division)
-  const timestamp =
-    typeof obj.time === 'number' ? obj.time * 1e-3 : Date.now() * 1e-3
-
-  // Build GELF 1.1 message
-  const gelfMessage: GelfMessage = {
-    version: '1.1',
-    host: hostname,
-    short_message: extractMessage(obj),
-    timestamp,
-    level: mapPinoLevelToGelf(obj.level as number),
-  }
-
-  // Add facility as additional field (deprecated in GELF spec, now sent as custom field)
-  if (facility) {
-    gelfMessage._facility = facility
-  }
-
-  addStaticMetadata(gelfMessage, staticMeta)
-  addStackTrace(gelfMessage, obj)
-  addCustomFields(gelfMessage, obj)
-
-  return JSON.stringify(gelfMessage)
+  return createGelfFormatter(hostname, facility, staticMeta)(chunk)
 }

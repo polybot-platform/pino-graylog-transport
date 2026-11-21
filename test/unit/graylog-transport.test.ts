@@ -1,3 +1,4 @@
+import net from 'node:net'
 import { Writable } from 'node:stream'
 import { expect } from 'chai'
 import { pino } from 'pino'
@@ -674,6 +675,93 @@ describe('Graylog Transport', () => {
 
       // Should complete within reasonable time
       expect(elapsed).to.be.lessThan(500)
+
+      stream.destroy()
+    })
+  })
+
+  describe('TCP Delivery', () => {
+    let server: net.Server
+    let port: number
+    let frames: string[]
+    let sockets: net.Socket[]
+
+    beforeEach((done) => {
+      frames = []
+      sockets = []
+      // Keeps connections open, like Graylog does
+      server = net.createServer((socket) => {
+        sockets.push(socket)
+        let buffer = ''
+        socket.setEncoding('utf8')
+        socket.on('data', (data: string) => {
+          buffer += data
+          const parts = buffer.split('\0')
+          buffer = parts.pop() ?? ''
+          frames.push(...parts)
+        })
+      })
+      server.listen(0, '127.0.0.1', () => {
+        port = (server.address() as net.AddressInfo).port
+        done()
+      })
+    })
+
+    afterEach((done) => {
+      for (const socket of sockets) socket.destroy()
+      server.close(() => done())
+    })
+
+    const connectedStream = async () => {
+      let resolveReady: () => void = () => {}
+      const ready = new Promise<void>((resolve) => {
+        resolveReady = resolve
+      })
+      const stream = graylogTransport({
+        host: '127.0.0.1',
+        port,
+        protocol: 'tcp',
+        onReady: () => resolveReady(),
+      })
+      await ready
+      return stream
+    }
+
+    const waitForFrames = async (count: number) => {
+      const deadline = Date.now() + 2000
+      while (frames.length < count && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 5))
+      }
+    }
+
+    it('should deliver every message logged in the same tick as its own GELF frame', async () => {
+      const stream = await connectedStream()
+      const logger = pino(stream)
+
+      for (let i = 0; i < 500; i++) logger.info({ i }, 'batched')
+
+      await waitForFrames(500)
+      expect(frames).to.have.length(500)
+      const ids = frames.map((frame) => JSON.parse(frame)._i)
+      expect(ids).to.deep.equal(Array.from({ length: 500 }, (_, i) => i))
+
+      stream.destroy()
+    })
+
+    it('should flush promptly while the server keeps the connection open', async () => {
+      const stream = await connectedStream()
+      const logger = pino(stream)
+
+      for (let i = 0; i < 10; i++) logger.info({ i }, 'before flush')
+
+      const startTime = Date.now()
+      await stream.flush(5000)
+      const elapsed = Date.now() - startTime
+
+      // Batched writes must not hold up flush() until its timeout
+      expect(elapsed).to.be.lessThan(1000)
+      await waitForFrames(10)
+      expect(frames).to.have.length(10)
 
       stream.destroy()
     })

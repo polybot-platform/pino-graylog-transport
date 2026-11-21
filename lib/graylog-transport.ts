@@ -2,7 +2,7 @@ import type net from 'node:net'
 import os from 'node:os'
 import { Writable } from 'node:stream'
 import { FlushManager } from './flush-manager'
-import { formatGelfMessage } from './gelf-formatter'
+import { createGelfFormatter, type GelfFormatter } from './gelf-formatter'
 import { MessageQueue } from './message-queue'
 import { SocketConnectionManager } from './socket-connection'
 import type { ErrorHandler, PinoGraylogTransportOptions } from './types'
@@ -16,6 +16,8 @@ export type { PinoGraylogTransportOptions } from './types'
  */
 export class PinoGraylogTransport extends Writable {
   private socket: net.Socket | null = null
+  // Socket currently corked by batchWrites(), uncorked at the end of the tick
+  private corkedSocket: net.Socket | null = null
   private udpClient: UdpClient | null = null
   private connectionPromise: Promise<net.Socket> | null = null
   private messageQueue: MessageQueue
@@ -28,9 +30,7 @@ export class PinoGraylogTransport extends Writable {
   private readonly host: string
   private readonly port: number
   private readonly protocol: 'tcp' | 'tls' | 'udp'
-  private readonly staticMeta: Record<string, unknown>
-  private readonly hostname: string
-  private readonly facility: string
+  private readonly formatGelf: GelfFormatter
   private readonly waitForDrain: boolean
   private readonly handleError: ErrorHandler
   private readonly onReady?: (success: boolean, error?: Error) => void
@@ -41,9 +41,12 @@ export class PinoGraylogTransport extends Writable {
     this.host = opts.host ?? 'localhost'
     this.port = opts.port ?? 12201
     this.protocol = opts.protocol ?? 'tls'
-    this.staticMeta = opts.staticMeta ?? {}
-    this.hostname = opts.hostname ?? os.hostname()
-    this.facility = opts.facility ?? this.hostname
+    const hostname = opts.hostname ?? os.hostname()
+    this.formatGelf = createGelfFormatter(
+      hostname,
+      opts.facility ?? hostname,
+      opts.staticMeta ?? {},
+    )
     this.waitForDrain =
       opts.waitForDrain === undefined ? true : Boolean(opts.waitForDrain)
 
@@ -172,6 +175,9 @@ export class PinoGraylogTransport extends Writable {
    * @param timeout Maximum time to wait in milliseconds (default: 5000)
    */
   async flush(timeout = 5000): Promise<void> {
+    // Don't wait for the end of the tick: the flush below waits for the
+    // socket's buffer to empty, which corked data would hold up.
+    this.releaseCork()
     return this.flushManager.flush(timeout)
   }
 
@@ -182,12 +188,7 @@ export class PinoGraylogTransport extends Writable {
     _encoding: BufferEncoding,
     callback: (error?: Error | null) => void,
   ): void {
-    const gelfStr = formatGelfMessage(
-      chunk,
-      this.hostname,
-      this.facility,
-      this.staticMeta,
-    )
+    const gelfStr = this.formatGelf(chunk)
 
     // UDP: Send directly without null terminator (not required for UDP GELF)
     if (this.protocol === 'udp' && this.udpClient) {
@@ -284,6 +285,8 @@ export class PinoGraylogTransport extends Writable {
   ): void {
     let canContinue: boolean
 
+    this.batchWrites(socket)
+
     // Only track pending writes when flush is in progress (avoids overhead in normal operation)
     if (this.flushManager.trackWrite()) {
       canContinue = socket.write(message, () => {
@@ -369,8 +372,32 @@ export class PinoGraylogTransport extends Writable {
     return this.connectionPromise
   }
 
+  /**
+   * Corks the socket until the end of the current tick, so every message
+   * logged in the same tick goes out in one system call instead of one each.
+   */
+  private batchWrites(socket: net.Socket): void {
+    if (this.corkedSocket === socket) return
+    this.corkedSocket = socket
+    socket.cork()
+    process.nextTick(() => {
+      if (this.corkedSocket === socket) this.releaseCork()
+    })
+  }
+
+  /** Sends anything batchWrites() is holding now instead of at the end of the tick. */
+  private releaseCork(): void {
+    const socket = this.corkedSocket
+    if (!socket) return
+    this.corkedSocket = null
+    socket.uncork()
+  }
+
   private flushQueuedMessages(): void {
     const messagesToFlush = this.messageQueue.flush()
+    if (this.socket && messagesToFlush.length > 0) {
+      this.batchWrites(this.socket)
+    }
     for (const msg of messagesToFlush) {
       if (this.socket && !this.socket.destroyed) {
         if (this.flushManager.trackWrite()) {
