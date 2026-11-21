@@ -52,17 +52,19 @@ services:
     depends_on:
       - mongodb
       - opensearch
+    # Bound to 127.0.0.1: the admin:admin web UI and the unauthenticated
+    # inputs are for local development only
     ports:
       # Graylog web interface and REST API (host:container)
-      - "9005:9000"
+      - "127.0.0.1:9005:9000"
       # GELF UDP
-      - "12201:12201/udp"
+      - "127.0.0.1:12201:12201/udp"
       # GELF TCP
-      - "12201:12201/tcp"
+      - "127.0.0.1:12201:12201/tcp"
       # Syslog UDP
-      - "1514:1514/udp"
+      - "127.0.0.1:1514:1514/udp"
       # Syslog TCP
-      - "1514:1514/tcp"
+      - "127.0.0.1:1514:1514/tcp"
     volumes:
       - graylog_data:/usr/share/graylog/data
     networks:
