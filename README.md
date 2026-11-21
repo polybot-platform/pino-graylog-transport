@@ -250,7 +250,7 @@ const logger = pino(await transport({
 - For large messages, use TCP or TLS protocols instead
 - No delivery guarantees (fire-and-forget)
 
-**Bun Runtime:** When running under [Bun](https://bun.sh/), the UDP transport automatically uses Bun's native `Bun.udpSocket()` API for better performance. Falls back to Node's `dgram` module if unavailable.
+**Bun Runtime:** When running under [Bun](https://bun.sh/), the UDP transport automatically uses Bun's native `Bun.udpSocket()` API for better performance. The host name is resolved once and refreshed every 60 seconds, because `Bun.udpSocket()` only sends to IP addresses. If the Bun socket cannot be created, the transport falls back to Node's `dgram` module.
 
 ### Run the Example
 
@@ -453,25 +453,17 @@ The test runs three scenarios in parallel:
 
 Compare the `*_duration` metrics to see the logging overhead for each library.
 
-### Latest Benchmark Results (January 2026)
+### Latest Benchmark Results (November 2026)
 
-Tests performed on a local development machine using k6 (10s duration, 50 VUs).
+Tests performed on a local development machine (18 cores) using k6: 100 VUs, 15 seconds per scenario, with a 100-field log payload. Each result is the average of two runs. Every message logged by pino arrived in Graylog.
 
-#### Node.js Runtime
-| Library | Requests/sec | Relative Performance |
-|---------|--------------|----------------------|
-| Baseline (No logs) | ~2,502 | 100% |
-| **Pino Graylog** | **~1,355** | **54%** |
-| Winston (log2gelf) | ~1,183 | 47% |
+| Library | Node.js 24 | Bun 1.4.5 |
+|---------|------------|-----------|
+| Baseline (No logs) | ~2,520 req/s (100%) | ~2,525 req/s (100%) |
+| **Pino Graylog** | **~1,550 req/s (62%)** | **~1,480 req/s (59%)** |
+| Winston (log2gelf) | ~1,250 req/s (50%) | ~1,495 req/s (59%) |
 
-#### Bun Runtime 🚀
-| Library | Requests/sec | Relative Performance |
-|---------|--------------|----------------------|
-| Baseline (No logs) | ~2,472 | 100% |
-| **Pino Graylog** | **~2,005** | **81%** |
-| Winston (log2gelf) | ~1,209 | 49% |
-
-> **Performance Tip:** Using the **Bun** runtime with `@alex-michaud/pino-graylog-transport` yields a massive performance boost, maintaining over **80% of the baseline throughput** (compared to ~54% on Node.js) while outperforming Winston by a significant margin.
+Graylog ran on the same machine, so these numbers include the CPU that Graylog uses to receive and index the logs. With the logs sent to a local TCP server that discards them, pino keeps 94% of the baseline throughput on Node.js (Winston: 75%) and 90% on Bun (Winston: 91%).
 
 ## License
 

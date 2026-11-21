@@ -1,16 +1,6 @@
 import net from 'node:net'
 import tls from 'node:tls'
 
-// Runtime detection: Check if running in Bun (which has faster APIs)
-const isBun = typeof process.versions.bun !== 'undefined'
-
-// Type definition for Bun globals (to avoid 'any' types)
-interface BunGlobal {
-  Bun?: {
-    connect: (opts: unknown) => net.Socket
-  }
-}
-
 export interface SocketConnectionOpts {
   host: string
   port: number
@@ -21,7 +11,11 @@ export interface SocketConnectionOpts {
 }
 
 /**
- * Creates a socket connection (TCP, TLS, or Bun-optimized)
+ * Creates a TCP or TLS socket connection.
+ *
+ * Bun implements node:net and node:tls natively, so the same code is used in
+ * both runtimes. (Bun.connect() returns a Promise of a socket with a different
+ * API, which this transport's net.Socket handling does not support.)
  */
 export class SocketConnectionManager {
   createConnection(opts: SocketConnectionOpts): {
@@ -48,64 +42,12 @@ export class SocketConnectionManager {
     }, 10000)
 
     if (opts.protocol === 'tcp') {
-      socket = this.createTcpConnection(opts, connectionTimeout)
+      socket = this.createNodeTcpConnection(opts, connectionTimeout)
     } else {
       socket = this.createTlsConnection(opts, connectionTimeout)
     }
 
     return { socket, cleanup }
-  }
-
-  private createTcpConnection(
-    opts: SocketConnectionOpts,
-    connectionTimeout: NodeJS.Timeout,
-  ): net.Socket {
-    // Bun optimization: Use Bun.connect() if available (faster TCP connection)
-    if (
-      isBun &&
-      typeof (globalThis as unknown as BunGlobal).Bun?.connect === 'function'
-    ) {
-      return this.createBunConnection(opts, connectionTimeout)
-    }
-    return this.createNodeTcpConnection(opts, connectionTimeout)
-  }
-
-  private createBunConnection(
-    opts: SocketConnectionOpts,
-    connectionTimeout: NodeJS.Timeout,
-  ): net.Socket {
-    try {
-      const bunSocket = (globalThis as unknown as BunGlobal).Bun?.connect({
-        hostname: opts.host,
-        port: opts.port,
-        socket: {
-          data: () => {},
-          open: () => {
-            clearTimeout(connectionTimeout)
-            opts.onConnect()
-          },
-          error: (error: Error) => {
-            clearTimeout(connectionTimeout)
-            opts.onError(error, {
-              host: opts.host,
-              port: opts.port,
-              reason: 'TCP connection error (Bun)',
-            })
-          },
-          close: () => {
-            clearTimeout(connectionTimeout)
-            opts.onClose()
-          },
-        },
-      })
-      const socket = bunSocket as net.Socket
-      if (typeof socket.setNoDelay === 'function') socket.setNoDelay(true)
-      if (typeof socket.setKeepAlive === 'function') socket.setKeepAlive(true)
-      return socket
-    } catch (_bunError) {
-      // Fallback to Node.js if Bun.connect fails
-      return this.createNodeTcpConnection(opts, connectionTimeout)
-    }
   }
 
   private createNodeTcpConnection(
