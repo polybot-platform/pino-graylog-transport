@@ -20,6 +20,10 @@ export type { GraylogTlsOptions, PinoGraylogTransportOptions } from './types'
 const MIN_RECONNECT_DELAY_MS = 1000
 const MAX_RECONNECT_DELAY_MS = 30_000
 
+// A partial line longer than this is sent as it is instead of waiting for
+// the rest of it, so a stream without newlines cannot grow without limit
+const MAX_PARTIAL_LINE_LENGTH = 4 * 1024 * 1024
+
 const noop = () => {}
 
 function toError(err: unknown): Error {
@@ -42,6 +46,11 @@ export class PinoGraylogTransport extends Writable {
   private reconnectDelay = 0
   private nextConnectAt = 0
   private reconnectTimer: NodeJS.Timeout | null = null
+  // Text received after the last newline, waiting for the rest of its line
+  private partialLine = ''
+  // Set once a chunk looks like pino's JSON lines: from then on, text after
+  // the last newline is the start of a line
+  private lineMode = false
   private messageQueue: MessageQueue
   private flushManager: FlushManager
   private initializationAttempted = false
@@ -212,40 +221,166 @@ export class PinoGraylogTransport extends Writable {
     _encoding: BufferEncoding,
     callback: (error?: Error | null) => void,
   ): void {
-    // Errors are reported through onError and never passed to the stream
-    // callback: that would destroy the stream, and crash the process if
-    // nothing listens for 'error'. One bad record must not stop logging.
-    let gelfStr: string
+    // Fast path for what pino writes in-process: exactly one complete line
+    if (typeof chunk === 'string' && !this.partialLine) {
+      const newline = chunk.indexOf('\n')
+      if (newline === chunk.length - 1 && newline > 0) {
+        this.lineMode = true
+        this.sendRecord(chunk.slice(0, newline), callback)
+        return
+      }
+    }
+    if (typeof chunk !== 'string' && !Buffer.isBuffer(chunk)) {
+      this.sendRecord(chunk, callback)
+      return
+    }
+    this.sendRecords(this.toRecords(chunk), callback)
+  }
+
+  /**
+   * Splits a chunk into log records. Pino writes one line per record, but
+   * when the transport runs in a worker (pino.transport()), one chunk can hold
+   * many lines and a line can be split across chunks.
+   */
+  private toRecords(chunk: unknown): unknown[] {
+    if (typeof chunk !== 'string' && !Buffer.isBuffer(chunk)) return [chunk]
+
+    let text = typeof chunk === 'string' ? chunk : chunk.toString()
+    if (this.partialLine) {
+      text = this.partialLine + text
+      this.partialLine = ''
+    }
+
+    const lastNewline = text.lastIndexOf('\n')
+    // Pino writes JSON lines ending with a newline. Until a chunk looks like
+    // that (ends with a newline, or starts with '{' and holds one, as when a
+    // worker's first chunk ends mid-line), each chunk is a complete message
+    // written directly, such as plain text with a line break.
+    if (
+      !this.lineMode &&
+      lastNewline !== -1 &&
+      (lastNewline === text.length - 1 || text.charCodeAt(0) === 123) // {
+    ) {
+      this.lineMode = true
+    }
+    if (!this.lineMode) return [text]
+
+    if (lastNewline === -1) {
+      // The start of a line: wait for the rest, unless it is far too long
+      if (text.length > MAX_PARTIAL_LINE_LENGTH) return [text]
+      this.partialLine = text
+      return []
+    }
+    if (lastNewline < text.length - 1) {
+      this.partialLine = text.slice(lastNewline + 1)
+    }
+    // The common case: one complete line, as written by pino in-process
+    if (text.indexOf('\n') === lastNewline) {
+      return lastNewline === 0 ? [] : [text.slice(0, lastNewline)]
+    }
+    return text
+      .slice(0, lastNewline)
+      .split('\n')
+      .filter((line) => line.length > 0)
+  }
+
+  /**
+   * Formats a record as GELF, or reports why it cannot be. Errors are
+   * reported through onError and never passed to the stream callback: that
+   * would destroy the stream, and crash the process if nothing listens for
+   * 'error'. One bad record must not stop logging.
+   */
+  private format(record: unknown): string | null {
     try {
-      gelfStr = this.formatGelf(chunk)
+      return this.formatGelf(record)
     } catch (err) {
       this.handleError(toError(err), {
         reason: 'Failed to format log record as GELF',
       })
+      return null
+    }
+  }
+
+  /** Formats and sends one record */
+  private sendRecord(
+    record: unknown,
+    callback: (error?: Error | null) => void,
+  ): void {
+    const message = this.format(record)
+    if (message === null) {
       callback()
       return
     }
 
-    // UDP: Send directly without null terminator (not required for UDP GELF)
+    // UDP: no null terminator (not required for UDP GELF). UdpClient reports
+    // send errors (such as oversized messages) itself.
     if (this.protocol === 'udp' && this.udpClient) {
-      // UdpClient reports send errors (such as oversized messages) itself
-      this.udpClient.send(gelfStr, () => callback())
+      this.udpClient.send(message, () => callback())
       return
     }
 
-    // TCP/TLS: Append null terminator as message delimiter
-    const message = `${gelfStr}\0`
-
+    // TCP/TLS: null terminator as message delimiter
     const socket = this.socket
     if (socket && !socket.destroyed) {
-      this.writeToSocket(socket, message, callback)
+      this.writeToSocket(socket, `${message}\0`, callback)
     } else {
-      this.queueMessage(message, callback)
+      this.messageQueue.enqueue(`${message}\0`)
+      this.scheduleConnect()
+      callback()
+    }
+  }
+
+  /** Formats and sends several records, such as the lines of one chunk */
+  private sendRecords(
+    records: unknown[],
+    callback: (error?: Error | null) => void,
+  ): void {
+    if (records.length === 1) {
+      this.sendRecord(records[0], callback)
+      return
+    }
+
+    const messages: string[] = []
+    for (const record of records) {
+      const message = this.format(record)
+      if (message !== null) messages.push(message)
+    }
+
+    if (messages.length === 0) {
+      callback()
+      return
+    }
+
+    // UDP: one datagram per message
+    if (this.protocol === 'udp' && this.udpClient) {
+      let remaining = messages.length
+      const sent = () => {
+        if (--remaining === 0) callback()
+      }
+      for (const message of messages) this.udpClient.send(message, sent)
+      return
+    }
+
+    // TCP/TLS: all messages in one write
+    const socket = this.socket
+    if (socket && !socket.destroyed) {
+      this.writeToSocket(socket, `${messages.join('\0')}\0`, callback)
+    } else {
+      for (const message of messages) this.messageQueue.enqueue(`${message}\0`)
+      this.scheduleConnect()
+      callback()
     }
   }
 
   override _final(callback: (error?: Error | null) => void): void {
     this.closing = true
+
+    // A last line that never got its newline
+    if (this.partialLine) {
+      const line = this.partialLine
+      this.partialLine = ''
+      this.sendRecords([line], noop)
+    }
 
     const finishClose = () => {
       if (this.socket && !this.socket.destroyed) {
@@ -372,15 +507,6 @@ export class PinoGraylogTransport extends Writable {
     socket.once('drain', done)
     socket.once('close', done)
     socket.once('error', done)
-  }
-
-  private queueMessage(
-    message: string,
-    callback: (error?: Error | null) => void,
-  ): void {
-    this.messageQueue.enqueue(message)
-    this.scheduleConnect()
-    callback()
   }
 
   /**
