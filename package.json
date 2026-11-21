@@ -1,7 +1,7 @@
 {
-  "name": "@alex-michaud/pino-graylog-transport",
+  "name": "pino-graylog-transport",
   "version": "1.3.1",
-  "author": "Alexandre Michaud <alex-michaud@users.noreply.github.com>",
+  "author": "Polybot Platform (https://polybotplatform.com)",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/polybot-platform/pino-graylog-transport.git"
