@@ -1,3 +1,13 @@
+## [1.2.3](https://github.com/polybot-platform/pino-graylog-transport/compare/v1.2.2...v1.2.3) (2026-11-21)
+
+### Bug Fixes
+
+* make TCP and UDP logging work under Bun ([f7c935b](https://github.com/polybot-platform/pino-graylog-transport/commit/f7c935b5f45bd21ae8b252f19a1b0b495d42caf5))
+
+### Performance Improvements
+
+* faster GELF formatting and batched TCP writes ([a422886](https://github.com/polybot-platform/pino-graylog-transport/commit/a422886f4595e490499035740293182913f669a0))
+
 ## [1.2.2](https://github.com/polybot-platform/pino-graylog-transport/compare/v1.2.1...v1.2.2) (2026-11-20)
 
 ### Bug Fixes
