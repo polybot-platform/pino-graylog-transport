@@ -16,14 +16,17 @@ import type { Options } from 'k6/options'
 const baselineDuration = new Trend('baseline_duration')
 const pinoDuration = new Trend('pino_duration')
 const winstonDuration = new Trend('winston_duration')
+const pinoWorkerDuration = new Trend('pino_worker_duration')
 
 const baselineSuccess = new Rate('baseline_success')
 const pinoSuccess = new Rate('pino_success')
 const winstonSuccess = new Rate('winston_success')
+const pinoWorkerSuccess = new Rate('pino_worker_success')
 
 const baselineRequests = new Counter('baseline_requests')
 const pinoRequests = new Counter('pino_requests')
 const winstonRequests = new Counter('winston_requests')
+const pinoWorkerRequests = new Counter('pino_worker_requests')
 
 // Test configuration
 const VUS = 100 // 100 VUs per scenario
@@ -56,16 +59,26 @@ export const options: Options = {
       startTime: '40s',
       exec: 'testWinston',
     },
+    // Pino in a worker thread runs fourth (60s-75s)
+    pino_worker: {
+      executor: 'constant-vus',
+      vus: VUS,
+      duration: DURATION,
+      startTime: '60s',
+      exec: 'testPinoWorker',
+    },
   },
   thresholds: {
     // Relax thresholds for high load
     baseline_duration: ['p(95)<200'],
     pino_duration: ['p(95)<300'],
     winston_duration: ['p(95)<500'],
+    pino_worker_duration: ['p(95)<300'],
     // All should have high success rate
     baseline_success: ['rate>0.99'],
     pino_success: ['rate>0.99'],
     winston_success: ['rate>0.99'],
+    pino_worker_success: ['rate>0.99'],
   },
 }
 
@@ -165,6 +178,23 @@ export function testWinston() {
   sleep(0.01) // 10ms between requests
 }
 
+// Pino test - our transport in a worker thread (pino.transport())
+export function testPinoWorker() {
+  const start = Date.now()
+  const response = http.post(`${BASE_URL}/pino-worker`, payload, params)
+  const duration = Date.now() - start
+
+  const success = check(response, {
+    'pino worker status 200': (r) => r.status === 200,
+  })
+
+  pinoWorkerDuration.add(duration)
+  pinoWorkerSuccess.add(success ? 1 : 0)
+  pinoWorkerRequests.add(1)
+
+  sleep(0.01) // 10ms between requests
+}
+
 export function teardown() {
   console.log('')
   console.log('='.repeat(60))
@@ -175,11 +205,15 @@ export function teardown() {
   console.log('  1. Baseline (0s-15s): No logging')
   console.log('  2. Pino (20s-35s): pino-graylog-transport')
   console.log('  3. Winston (40s-55s): winston + winston-log2gelf')
+  console.log('  4. Pino worker (60s-75s): pino.transport() worker thread')
   console.log('')
   console.log('Compare the metrics above:')
   console.log('  - baseline_requests: throughput without logging')
   console.log('  - pino_requests:     throughput with pino transport')
   console.log('  - winston_requests:  throughput with winston transport')
+  console.log(
+    '  - pino_worker_requests: throughput with pino in a worker thread',
+  )
   console.log('')
   console.log('Higher requests/s = better performance')
   console.log(

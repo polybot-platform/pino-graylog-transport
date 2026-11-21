@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import http from 'node:http'
+import path from 'node:path'
 import pino from 'pino'
 import winston from 'winston'
 import transport from '../../dist/index'
@@ -11,6 +12,8 @@ import transport from '../../dist/index'
  * - GET /health - Health check
  * - POST /baseline - No logging (baseline)
  * - POST /pino - Logs with pino-graylog-transport
+ * - POST /pino-worker - Logs with pino-graylog-transport in a worker thread
+ *   (pino.transport())
  * - POST /winston - Logs with winston + winston-log2gelf
  */
 
@@ -34,6 +37,25 @@ const pinoTransport = transport({
 })
 
 const pinoLogger = pino({ level: 'info' }, pinoTransport)
+
+// Same transport in a worker thread: formatting and sending happen off the
+// main thread (the compiled package, as users load it from npm)
+const pinoWorkerLogger = pino(
+  { level: 'info' },
+  pino.transport({
+    target: path.resolve(__dirname, '../../dist/index.js'),
+    options: {
+      host: graylogHost,
+      port: graylogPort,
+      protocol: 'tcp',
+      facility: 'pino-benchmark',
+      staticMeta: { benchmark: 'pino_worker' },
+      waitForDrain: false,
+      dropWhenFull: true,
+      maxQueueSize: 10000,
+    },
+  }),
+)
 
 // --- WINSTON SETUP ---
 let winstonGraylogTransport = null
@@ -146,6 +168,30 @@ const server = http.createServer((req, res) => {
     return
   }
 
+  // Pino with our transport in a worker thread
+  if (req.method === 'POST' && req.url === '/pino-worker') {
+    let body = ''
+    req.on('data', (chunk) => {
+      body += chunk.toString()
+    })
+    req.on('end', () => {
+      try {
+        const data = JSON.parse(body)
+        pinoWorkerLogger.info(
+          { requestId, ...data.metadata },
+          data.message || 'Pino benchmark log',
+        )
+      } catch {
+        pinoWorkerLogger.info({ requestId }, 'Pino benchmark log')
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(
+        JSON.stringify({ success: true, logger: 'pino-worker', requestId }),
+      )
+    })
+    return
+  }
+
   // Winston with winston-graylog2
   if (req.method === 'POST' && req.url === '/winston') {
     let body = ''
@@ -181,6 +227,7 @@ server.listen(port, () => {
   console.log('Endpoints:')
   console.log('  POST /baseline - No logging (baseline)')
   console.log('  POST /pino     - pino-graylog-transport')
+  console.log('  POST /pino-worker - pino-graylog-transport (worker thread)')
   console.log('  POST /winston  - winston + winston-log2gelf')
   console.log('  GET  /health   - Health check')
 })

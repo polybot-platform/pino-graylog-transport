@@ -17,14 +17,14 @@ Built and maintained by the team behind [Polybot](https://polybotplatform.com), 
 ## Installation
 
 ```bash
-npm install @alex-michaud/pino-graylog-transport pino
+npm install pino-graylog-transport pino
 ```
 
 ## Quick Start
 
 ```javascript
 const pino = require('pino');
-const transport = require('@alex-michaud/pino-graylog-transport');
+const transport = require('pino-graylog-transport');
 
 const transportInstance = transport({
   host: 'graylog.example.com',
@@ -44,6 +44,25 @@ const logger = pino(transportInstance);
 
 logger.info('Hello Graylog!');
 ```
+
+### Running in a Worker Thread
+
+Pino can run the transport in a worker thread with `pino.transport()`. Formatting and sending then happen outside your application's main thread:
+
+```javascript
+const pino = require('pino');
+
+const logger = pino(pino.transport({
+  target: 'pino-graylog-transport',
+  options: {
+    host: 'graylog.example.com',
+    port: 12201,
+    facility: 'my-app',
+  },
+}));
+```
+
+The options are copied to the worker, so they cannot contain functions: `onError` and `onReady` are only available when the transport runs in the main thread, as in the Quick Start.
 
 ## Configuration Options
 
@@ -76,7 +95,7 @@ If your Graylog server uses a certificate from an internal certificate authority
 
 ```javascript
 const fs = require('node:fs');
-const transport = require('@alex-michaud/pino-graylog-transport');
+const transport = require('pino-graylog-transport');
 
 const transportInstance = transport({
   host: 'graylog.internal.example.com',
@@ -96,7 +115,7 @@ const transportInstance = transport({
 Some Graylog services require authentication tokens to be sent with every log message. Use `staticMeta` to include these tokens and any other metadata that should be sent with **all** log messages:
 
 ```javascript
-const transport = require('@alex-michaud/pino-graylog-transport');
+const transport = require('pino-graylog-transport');
 
 // Example: OVH Logs Data Platform
 const stream = transport({
@@ -203,7 +222,7 @@ docker compose down
 
 ```javascript
 const pino = require('pino');
-const transport = require('@alex-michaud/pino-graylog-transport');
+const transport = require('pino-graylog-transport');
 
 // For local development (localhost)
 const logger = pino(transport({
@@ -429,21 +448,47 @@ The transport converts Pino log objects to GELF format:
 
 ## Performance
 
-The GELF formatting logic is optimized for speed. Benchmarks were run using [mitata](https://github.com/evanwashere/mitata) to measure the overhead of message transformation (excluding network I/O).
+### Load Test Results (November 2026)
 
-### Benchmark Results
+The comparison load test sends HTTP requests to a server that logs one record per request, and measures how many requests per second the server handles. Each log record has about 100 fields.
 
-| Benchmark | Time | Description |
-|-----------|------|-------------|
-| JSON.stringify (Raw) | 615 ns | Baseline - just serialization, no transformation |
-| **pino-graylog-transport** | **1.29 µs** | Our GELF formatter |
-| Manual GELF Construction | 1.88 µs | Simulated naive implementation |
+- **Setup:** local machine with 18 cores, k6 with 100 virtual users, 15 seconds per scenario, scenarios run one after the other.
+- **Versions:** Node.js 24.12, Bun 1.4.5, pino-graylog-transport 1.3.2.
+- **Results:** the average of three runs, after one run to warm up Graylog. Every message that pino logged arrived in Graylog.
 
-### Key Takeaways
+**Sending to Graylog**, which runs on the same machine:
 
-- ✅ **31% faster** than a naive manual GELF construction approach
-- ✅ **~775,000 messages/second** theoretical formatting throughput (single-threaded)
-- ✅ **Negligible overhead**: The ~0.67 µs formatting overhead is 1000-100,000x smaller than typical network latency
+| Logger | Node.js 24 | Bun 1.4.5 |
+|--------|------------|-----------|
+| No logging (baseline) | ~9,240 req/s (100%) | ~9,230 req/s (100%) |
+| **Pino Graylog, worker thread (`pino.transport()`)** | **~5,900 req/s (64%)** | **~6,300 req/s (68%)** |
+| Pino Graylog, main thread | ~4,750 req/s (51%) | ~4,900 req/s (53%) |
+| Winston (log2gelf) | ~4,200 req/s (46%) | ~5,250 req/s (57%) |
+
+These results include the CPU that Graylog uses to receive and index the logs on the same machine, and they vary with Graylog's load.
+
+**Sending to a local TCP server that discards the logs:** this shows the cost of the logger alone.
+
+| Logger | Node.js 24 | Bun 1.4.5 |
+|--------|------------|-----------|
+| **Pino Graylog, worker thread** | **96%** | **98%** |
+| Pino Graylog, main thread | 93% | 91% |
+| Winston (log2gelf) | 75% | 94% |
+
+**Main points:**
+
+- **Run the transport in a worker thread** (see [Running in a Worker Thread](#running-in-a-worker-thread)). Formatting and sending then happen outside the thread that handles requests.
+- **Large log records cost the most.** Pino writes each record as JSON, and the transport parses it and encodes each field again as GELF. With small records (about 5 fields), the transport adds about 4 to 5 µs per log line.
+
+### Formatting Microbenchmark
+
+This benchmark measures only the conversion of one Pino log record (8 fields) to GELF, without network I/O. It uses [mitata](https://github.com/evanwashere/mitata).
+
+| Benchmark | Node.js 24 | Bun 1.4.5 |
+|-----------|------------|-----------|
+| `JSON.stringify` of the record (for comparison) | 587 ns | 298 ns |
+| **pino-graylog-transport formatter** | **1.15 µs** | **587 ns** |
+| Simple GELF formatter (object, then `JSON.stringify`) | 2.33 µs | 900 ns |
 
 ### Run Benchmarks
 
@@ -454,7 +499,7 @@ npm run benchmark
 
 ### Comparison Load Test (pino vs winston)
 
-This test compares the real-world performance of `@alex-michaud/pino-graylog-transport` against `winston + winston-log2gelf`:
+This test compares `pino-graylog-transport` with `winston + winston-log2gelf`:
 
 ```bash
 # Start Graylog
@@ -463,29 +508,20 @@ npm run docker:setup
 
 # Start the comparison server (in one terminal)
 npm run start:comparison-server
+# or, to test with Bun:
+npm run start:comparison-server:bun
 
 # Run the comparison load test (in another terminal)
 npm run benchmark:load
 ```
 
-The test runs three scenarios in parallel:
+The test runs four scenarios, one after the other:
 - **Baseline**: No logging (measures pure HTTP overhead)
-- **Pino**: Using @alex-michaud/pino-graylog-transport
-- **Winston**: Using winston + winston-log2gelf
+- **Pino**: pino-graylog-transport in the main thread
+- **Winston**: winston + winston-log2gelf
+- **Pino worker**: pino-graylog-transport in a worker thread (`pino.transport()`)
 
-Compare the `*_duration` metrics to see the logging overhead for each library.
-
-### Latest Benchmark Results (November 2026)
-
-Tests performed on a local development machine (18 cores) using k6: 100 VUs, 15 seconds per scenario, with a 100-field log payload. Each result is the average of two runs. Every message logged by pino arrived in Graylog.
-
-| Library | Node.js 24 | Bun 1.4.5 |
-|---------|------------|-----------|
-| Baseline (No logs) | ~2,520 req/s (100%) | ~2,525 req/s (100%) |
-| **Pino Graylog** | **~1,550 req/s (62%)** | **~1,480 req/s (59%)** |
-| Winston (log2gelf) | ~1,250 req/s (50%) | ~1,495 req/s (59%) |
-
-Graylog ran on the same machine, so these numbers include the CPU that Graylog uses to receive and index the logs. With the logs sent to a local TCP server that discards them, pino keeps 94% of the baseline throughput on Node.js (Winston: 75%) and 90% on Bun (Winston: 91%).
+k6 reports each `*_requests` rate over the whole test, not over the scenario's 15 seconds. To get the requests per second of a scenario, divide its request count by 15. The percentages compared to the baseline are the same either way.
 
 ## License
 
